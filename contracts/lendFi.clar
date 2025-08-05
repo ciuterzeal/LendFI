@@ -1,7 +1,6 @@
 ;; Title: LendFi - Multi-Collateral Lending Protocol
 ;; Description: A DeFi lending protocol supporting multiple collateral types with risk-based interest rates
 
-
 ;; Define the SIP-010 trait locally
 (define-trait sip-010-trait
   (
@@ -37,6 +36,8 @@
 (define-constant ERR-LOAN-HEALTHY u107)
 (define-constant ERR-LIQUIDATION-FAILED u108)
 (define-constant ERR-INVALID-LIQUIDATION-AMOUNT u109)
+(define-constant ERR-INVALID-PARAMETERS u110)
+(define-constant ERR-INVALID-CONTRACT u111)
 
 (define-constant CONTRACT-OWNER tx-sender)
 (define-constant minimum-deposit u100000) ;; Minimum deposit to open a loan
@@ -44,6 +45,52 @@
 (define-constant LIQUIDATION-THRESHOLD u120) ;; 120% - if health factor below this, liquidation allowed
 (define-constant LIQUIDATION-PENALTY u10) ;; 10% penalty for liquidation
 (define-constant HEALTH-FACTOR-PRECISION u100) ;; For health factor calculations
+
+;; Validation constants
+(define-constant MAX-LTV-RATIO u9500) ;; 95% max LTV
+(define-constant MIN-LTV-RATIO u1000) ;; 10% min LTV
+(define-constant MAX-LIQUIDATION-THRESHOLD u20000) ;; 200% max threshold
+(define-constant MIN-LIQUIDATION-THRESHOLD u10100) ;; 101% min threshold
+(define-constant MAX-RISK-TIER u5)
+(define-constant MIN-RISK-TIER u1)
+(define-constant MAX-INTEREST-MULTIPLIER u1000) ;; 10x max multiplier
+(define-constant MIN-INTEREST-MULTIPLIER u50) ;; 0.5x min multiplier
+(define-constant MAX-AMOUNT u340282366920938463463374607431768211455) ;; Max uint128
+
+;; Input validation functions
+(define-private (validate-amount (amount uint))
+  (and (> amount u0) (<= amount MAX-AMOUNT))
+)
+
+(define-private (validate-principal (addr principal))
+  (not (is-eq addr 'SP000000000000000000002Q6VF78))
+)
+
+(define-private (validate-ltv-ratio (ltv uint))
+  (and (>= ltv MIN-LTV-RATIO) (<= ltv MAX-LTV-RATIO))
+)
+
+(define-private (validate-liquidation-threshold (threshold uint))
+  (and (>= threshold MIN-LIQUIDATION-THRESHOLD) (<= threshold MAX-LIQUIDATION-THRESHOLD))
+)
+
+(define-private (validate-risk-tier (tier uint))
+  (and (>= tier MIN-RISK-TIER) (<= tier MAX-RISK-TIER))
+)
+
+(define-private (validate-interest-multiplier (multiplier uint))
+  (and (>= multiplier MIN-INTEREST-MULTIPLIER) (<= multiplier MAX-INTEREST-MULTIPLIER))
+)
+
+(define-private (validate-collateral-params (ltv uint) (threshold uint) (tier uint) (multiplier uint))
+  (and 
+    (validate-ltv-ratio ltv)
+    (validate-liquidation-threshold threshold)
+    (validate-risk-tier tier)
+    (validate-interest-multiplier multiplier)
+    (< ltv threshold) ;; LTV must be less than liquidation threshold
+  )
+)
 
 ;; Enhanced loan structure with collateral type
 (define-map loans
@@ -91,28 +138,26 @@
 (define-data-var yield-token-contract (optional principal) none)
 (define-data-var borrow-token-contract (optional principal) none)
 
-;; Admin function to set token contracts
+;; Admin function to set token contracts with validation
 (define-public (set-yield-token (token-contract principal))
-  (if (is-eq tx-sender (var-get admin))
-    (begin
-      (var-set yield-token-contract (some token-contract))
-      (ok true)
-    )
-    (err ERR-UNAUTHORIZED)
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) (err ERR-UNAUTHORIZED))
+    (asserts! (validate-principal token-contract) (err ERR-INVALID-CONTRACT))
+    (var-set yield-token-contract (some token-contract))
+    (ok true)
   )
 )
 
 (define-public (set-borrow-token (token-contract principal))
-  (if (is-eq tx-sender (var-get admin))
-    (begin
-      (var-set borrow-token-contract (some token-contract))
-      (ok true)
-    )
-    (err ERR-UNAUTHORIZED)
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) (err ERR-UNAUTHORIZED))
+    (asserts! (validate-principal token-contract) (err ERR-INVALID-CONTRACT))
+    (var-set borrow-token-contract (some token-contract))
+    (ok true)
   )
 )
 
-;; Admin function to add/update collateral types
+;; Admin function to add/update collateral types with validation
 (define-public (set-collateral-type 
   (token-contract principal)
   (ltv-ratio uint)
@@ -120,42 +165,38 @@
   (risk-tier uint)
   (enabled bool)
   (interest-multiplier uint))
-  (if (is-eq tx-sender (var-get admin))
-    (begin
-      (map-set collateral-types
-        { token-contract: token-contract }
-        {
-          ltv-ratio: ltv-ratio,
-          liquidation-threshold: liquidation-threshold,
-          risk-tier: risk-tier,
-          enabled: enabled,
-          interest-multiplier: interest-multiplier
-        }
-      )
-      (ok true)
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) (err ERR-UNAUTHORIZED))
+    (asserts! (validate-principal token-contract) (err ERR-INVALID-CONTRACT))
+    (asserts! (validate-collateral-params ltv-ratio liquidation-threshold risk-tier interest-multiplier) (err ERR-INVALID-PARAMETERS))
+    (map-set collateral-types
+      { token-contract: token-contract }
+      {
+        ltv-ratio: ltv-ratio,
+        liquidation-threshold: liquidation-threshold,
+        risk-tier: risk-tier,
+        enabled: enabled,
+        interest-multiplier: interest-multiplier
+      }
     )
-    (err ERR-UNAUTHORIZED)
+    (ok true)
   )
 )
 
 ;; Admin Controls
 (define-public (pause)
-  (if (is-eq tx-sender (var-get admin))
-    (begin
-      (var-set paused true)
-      (ok true)
-    )
-    (err ERR-UNAUTHORIZED)
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) (err ERR-UNAUTHORIZED))
+    (var-set paused true)
+    (ok true)
   )
 )
 
 (define-public (unpause)
-  (if (is-eq tx-sender (var-get admin))
-    (begin
-      (var-set paused false)
-      (ok true)
-    )
-    (err ERR-UNAUTHORIZED)
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin)) (err ERR-UNAUTHORIZED))
+    (var-set paused false)
+    (ok true)
   )
 )
 
@@ -208,59 +249,49 @@
     (collateral-token-contract (contract-of collateral-token-trait))
     (collateral-info (try! (get-collateral-type-info collateral-token-contract)))
   )
+    ;; Input validation
+    (asserts! (validate-amount collateral) (err ERR-INVALID-AMOUNT))
+    (asserts! (validate-amount loan-amount) (err ERR-INVALID-AMOUNT))
+    (asserts! (validate-principal collateral-token-contract) (err ERR-INVALID-CONTRACT))
+    (asserts! (validate-principal borrow-token) (err ERR-INVALID-CONTRACT))
+    
     ;; Verify the provided borrow token trait matches the stored contract
-    (if (not (is-eq (contract-of borrow-token-trait) borrow-token))
-      (err ERR-UNAUTHORIZED)
-      ;; Check if collateral type is enabled
-      (if (not (get enabled collateral-info))
-        (err ERR-COLLATERAL-TYPE-DISABLED)
-        (if (var-get paused)
-          (err ERR-PAUSED)
-          (if (< collateral minimum-deposit)
-            (err ERR-INSUFFICIENT-COLLATERAL)
-            ;; Check LTV ratio
-            (let (
-              (max-loan (/ (* collateral (get ltv-ratio collateral-info)) u100))
-            )
-              (if (> loan-amount max-loan)
-                (err ERR-INSUFFICIENT-COLLATERAL)
-                (begin
-                  ;; Transfer collateral into contract
-                  (match (contract-call? collateral-token-trait transfer collateral tx-sender (as-contract tx-sender) none)
-                    success (if success
-                      (begin
-                        ;; Store loan with collateral type
-                        (let ((lid (var-get next-loan-id)))
-                          (map-set loans
-                            { loan-id: lid }
-                            {
-                              owner: tx-sender,
-                              collateral: collateral,
-                              borrowed: loan-amount,
-                              repaid: false,
-                              start-height: stacks-block-height,
-                              collateral-type: collateral-token-contract
-                            }
-                          )
-                          (var-set next-loan-id (+ lid u1))
-                          (ok lid)
-                        )
-                      )
-                      (err ERR-TRANSFER-FAILED)
-                    )
-                    error (err error)
-                  )
-                )
-              )
-            )
-          )
+    (asserts! (is-eq (contract-of borrow-token-trait) borrow-token) (err ERR-UNAUTHORIZED))
+    ;; Check if collateral type is enabled
+    (asserts! (get enabled collateral-info) (err ERR-COLLATERAL-TYPE-DISABLED))
+    (asserts! (not (var-get paused)) (err ERR-PAUSED))
+    (asserts! (>= collateral minimum-deposit) (err ERR-INSUFFICIENT-COLLATERAL))
+    
+    ;; Check LTV ratio
+    (let (
+      (max-loan (/ (* collateral (get ltv-ratio collateral-info)) u100))
+    )
+      (asserts! (<= loan-amount max-loan) (err ERR-INSUFFICIENT-COLLATERAL))
+      
+      ;; Transfer collateral into contract
+      (try! (contract-call? collateral-token-trait transfer collateral tx-sender (as-contract tx-sender) none))
+      
+      ;; Store loan with collateral type
+      (let ((lid (var-get next-loan-id)))
+        (map-set loans
+          { loan-id: lid }
+          {
+            owner: tx-sender,
+            collateral: collateral,
+            borrowed: loan-amount,
+            repaid: false,
+            start-height: stacks-block-height,
+            collateral-type: collateral-token-contract
+          }
         )
+        (var-set next-loan-id (+ lid u1))
+        (ok lid)
       )
     )
   )
 )
 
-;; Liquidation function
+;; Liquidation function with validation
 (define-public (liquidate-loan 
   (lid uint) 
   (liquidation-amount uint)
@@ -272,65 +303,58 @@
     (collateral-info (try! (get-collateral-type-info (get collateral-type loan))))
     (liquidation-threshold (get liquidation-threshold collateral-info))
   )
+    ;; Input validation
+    (asserts! (validate-amount liquidation-amount) (err ERR-INVALID-AMOUNT))
+    (asserts! (validate-principal (contract-of collateral-token-trait)) (err ERR-INVALID-CONTRACT))
+    (asserts! (validate-principal (contract-of borrow-token-trait)) (err ERR-INVALID-CONTRACT))
+    
     ;; Verify token contracts match
-    (if (not (is-eq (contract-of collateral-token-trait) (get collateral-type loan)))
-      (err ERR-UNAUTHORIZED)
-      (if (not (is-eq (contract-of borrow-token-trait) (try! (get-borrow-token-contract))))
-        (err ERR-UNAUTHORIZED)
-        ;; Check if loan is unhealthy (below liquidation threshold)
-        (if (>= health-factor liquidation-threshold)
-          (err ERR-LOAN-HEALTHY)
-          (if (get repaid loan)
-            (err ERR-LOAN-ALREADY-REPAID)
-            (if (> liquidation-amount (get borrowed loan))
-              (err ERR-INVALID-LIQUIDATION-AMOUNT)
-              (let (
-                ;; Calculate collateral to seize (with penalty)
-                (collateral-to-seize (/ (* liquidation-amount (+ u100 LIQUIDATION-PENALTY)) u100))
-                (remaining-collateral (- (get collateral loan) collateral-to-seize))
-                (remaining-borrowed (- (get borrowed loan) liquidation-amount))
-                (liquidation-id (var-get next-liquidation-id))
-              )
-                (if (> collateral-to-seize (get collateral loan))
-                  (err ERR-LIQUIDATION-FAILED)
-                  (begin
-                    ;; Transfer collateral to liquidator
-                    (try! (as-contract (contract-call? collateral-token-trait transfer collateral-to-seize (as-contract tx-sender) tx-sender none)))
-                    
-                    ;; Update loan
-                    (map-set loans
-                      { loan-id: lid }
-                      {
-                        owner: (get owner loan),
-                        collateral: remaining-collateral,
-                        borrowed: remaining-borrowed,
-                        repaid: (is-eq remaining-borrowed u0),
-                        start-height: (get start-height loan),
-                        collateral-type: (get collateral-type loan)
-                      }
-                    )
-                    
-                    ;; Record liquidation
-                    (map-set liquidations
-                      { liquidation-id: liquidation-id }
-                      {
-                        loan-id: lid,
-                        liquidator: tx-sender,
-                        liquidated-amount: liquidation-amount,
-                        collateral-seized: collateral-to-seize,
-                        timestamp: stacks-block-height
-                      }
-                    )
-                    
-                    (var-set next-liquidation-id (+ liquidation-id u1))
-                    (ok liquidation-id)
-                  )
-                )
-              )
-            )
-          )
-        )
+    (asserts! (is-eq (contract-of collateral-token-trait) (get collateral-type loan)) (err ERR-UNAUTHORIZED))
+    (asserts! (is-eq (contract-of borrow-token-trait) (try! (get-borrow-token-contract))) (err ERR-UNAUTHORIZED))
+    ;; Check if loan is unhealthy (below liquidation threshold)
+    (asserts! (< health-factor liquidation-threshold) (err ERR-LOAN-HEALTHY))
+    (asserts! (not (get repaid loan)) (err ERR-LOAN-ALREADY-REPAID))
+    (asserts! (<= liquidation-amount (get borrowed loan)) (err ERR-INVALID-LIQUIDATION-AMOUNT))
+    
+    (let (
+      ;; Calculate collateral to seize (with penalty)
+      (collateral-to-seize (/ (* liquidation-amount (+ u100 LIQUIDATION-PENALTY)) u100))
+      (remaining-collateral (- (get collateral loan) collateral-to-seize))
+      (remaining-borrowed (- (get borrowed loan) liquidation-amount))
+      (liquidation-id (var-get next-liquidation-id))
+    )
+      (asserts! (<= collateral-to-seize (get collateral loan)) (err ERR-LIQUIDATION-FAILED))
+      
+      ;; Transfer collateral to liquidator
+      (try! (as-contract (contract-call? collateral-token-trait transfer collateral-to-seize (as-contract tx-sender) tx-sender none)))
+      
+      ;; Update loan
+      (map-set loans
+        { loan-id: lid }
+        {
+          owner: (get owner loan),
+          collateral: remaining-collateral,
+          borrowed: remaining-borrowed,
+          repaid: (is-eq remaining-borrowed u0),
+          start-height: (get start-height loan),
+          collateral-type: (get collateral-type loan)
+        }
       )
+      
+      ;; Record liquidation
+      (map-set liquidations
+        { liquidation-id: liquidation-id }
+        {
+          loan-id: lid,
+          liquidator: tx-sender,
+          liquidated-amount: liquidation-amount,
+          collateral-seized: collateral-to-seize,
+          timestamp: stacks-block-height
+        }
+      )
+      
+      (var-set next-liquidation-id (+ liquidation-id u1))
+      (ok liquidation-id)
     )
   )
 )
@@ -363,42 +387,35 @@
     (loan (try! (get-loan lid)))
     (collateral-info (try! (get-collateral-type-info (get collateral-type loan))))
   )
+    ;; Input validation
+    (asserts! (validate-principal (contract-of borrow-token-trait)) (err ERR-INVALID-CONTRACT))
+    
     ;; Verify the provided trait matches the stored contract
-    (if (not (is-eq (contract-of borrow-token-trait) borrow-token))
-      (err ERR-UNAUTHORIZED)
-      (if (not (is-eq (get owner loan) tx-sender))
-        (err ERR-UNAUTHORIZED)
-        (if (get repaid loan)
-          (err ERR-LOAN-ALREADY-REPAID)
-          (begin
-            ;; Calculate yield with risk-based interest multiplier
-            (let (
-              (blocks (- stacks-block-height (get start-height loan)))
-              (risk-adjusted-rate (/ (* interest-rate (get interest-multiplier collateral-info)) u100))
-              (yield (/ (* (get collateral loan) risk-adjusted-rate blocks) u52560)) ;; assume 1 year = 52560 blocks
-            )
-              (if (>= yield (get borrowed loan))
-                (begin
-                  ;; Mark as repaid
-                  (map-set loans 
-                    { loan-id: lid }
-                    {
-                      owner: (get owner loan),
-                      collateral: (get collateral loan),
-                      borrowed: (get borrowed loan),
-                      repaid: true,
-                      start-height: (get start-height loan),
-                      collateral-type: (get collateral-type loan)
-                    }
-                  )
-                  (ok true)
-                )
-                (err ERR-REPAYMENT-FAILED)
-              )
-            )
-          )
-        )
+    (asserts! (is-eq (contract-of borrow-token-trait) borrow-token) (err ERR-UNAUTHORIZED))
+    (asserts! (is-eq (get owner loan) tx-sender) (err ERR-UNAUTHORIZED))
+    (asserts! (not (get repaid loan)) (err ERR-LOAN-ALREADY-REPAID))
+    
+    ;; Calculate yield with risk-based interest multiplier
+    (let (
+      (blocks (- stacks-block-height (get start-height loan)))
+      (risk-adjusted-rate (/ (* interest-rate (get interest-multiplier collateral-info)) u100))
+      (yield (/ (* (get collateral loan) risk-adjusted-rate blocks) u52560)) ;; assume 1 year = 52560 blocks
+    )
+      (asserts! (>= yield (get borrowed loan)) (err ERR-REPAYMENT-FAILED))
+      
+      ;; Mark as repaid
+      (map-set loans 
+        { loan-id: lid }
+        {
+          owner: (get owner loan),
+          collateral: (get collateral loan),
+          borrowed: (get borrowed loan),
+          repaid: true,
+          start-height: (get start-height loan),
+          collateral-type: (get collateral-type loan)
+        }
       )
+      (ok true)
     )
   )
 )
@@ -408,14 +425,14 @@
   (let (
     (yield-token (try! (get-yield-token-contract)))
   )
+    ;; Input validation
+    (asserts! (validate-amount amount) (err ERR-INVALID-AMOUNT))
+    (asserts! (validate-principal (contract-of yield-token-trait)) (err ERR-INVALID-CONTRACT))
+    
     ;; Verify the provided trait matches the stored contract
-    (if (not (is-eq (contract-of yield-token-trait) yield-token))
-      (err ERR-UNAUTHORIZED)
-      (if (is-eq tx-sender (var-get admin))
-        (as-contract (contract-call? yield-token-trait transfer amount (as-contract tx-sender) tx-sender none))
-        (err ERR-UNAUTHORIZED)
-      )
-    )
+    (asserts! (is-eq (contract-of yield-token-trait) yield-token) (err ERR-UNAUTHORIZED))
+    (asserts! (is-eq tx-sender (var-get admin)) (err ERR-UNAUTHORIZED))
+    (as-contract (contract-call? yield-token-trait transfer amount (as-contract tx-sender) tx-sender none))
   )
 )
 
@@ -424,41 +441,30 @@
   (let (
     (loan (try! (get-loan lid)))
   )
+    ;; Input validation
+    (asserts! (validate-amount extra) (err ERR-INVALID-AMOUNT))
+    (asserts! (validate-principal (contract-of collateral-token-trait)) (err ERR-INVALID-CONTRACT))
+    
     ;; Verify the provided trait matches the loan's collateral type
-    (if (not (is-eq (contract-of collateral-token-trait) (get collateral-type loan)))
-      (err ERR-UNAUTHORIZED)
-      (if (<= extra u0)
-        (err ERR-INVALID-AMOUNT)
-        (if (var-get paused)
-          (err ERR-PAUSED)
-          (if (not (is-eq (get owner loan) tx-sender))
-            (err ERR-UNAUTHORIZED)
-            (if (get repaid loan)
-              (err ERR-LOAN-ALREADY-REPAID)
-              (match (contract-call? collateral-token-trait transfer extra tx-sender (as-contract tx-sender) none)
-                success (if success
-                  (let ((new-col (+ (get collateral loan) extra)))
-                    (map-set loans 
-                      { loan-id: lid }
-                      {
-                        owner: (get owner loan),
-                        collateral: new-col,
-                        borrowed: (get borrowed loan),
-                        repaid: false,
-                        start-height: (get start-height loan),
-                        collateral-type: (get collateral-type loan)
-                      }
-                    )
-                    (ok new-col)
-                  )
-                  (err ERR-TRANSFER-FAILED)
-                )
-                error (err error)
-              )
-            )
-          )
-        )
+    (asserts! (is-eq (contract-of collateral-token-trait) (get collateral-type loan)) (err ERR-UNAUTHORIZED))
+    (asserts! (not (var-get paused)) (err ERR-PAUSED))
+    (asserts! (is-eq (get owner loan) tx-sender) (err ERR-UNAUTHORIZED))
+    (asserts! (not (get repaid loan)) (err ERR-LOAN-ALREADY-REPAID))
+    
+    (try! (contract-call? collateral-token-trait transfer extra tx-sender (as-contract tx-sender) none))
+    (let ((new-col (+ (get collateral loan) extra)))
+      (map-set loans 
+        { loan-id: lid }
+        {
+          owner: (get owner loan),
+          collateral: new-col,
+          borrowed: (get borrowed loan),
+          repaid: false,
+          start-height: (get start-height loan),
+          collateral-type: (get collateral-type loan)
+        }
       )
+      (ok new-col)
     )
   )
 )
