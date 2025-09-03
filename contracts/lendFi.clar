@@ -271,6 +271,9 @@
       ;; Transfer collateral into contract
       (try! (contract-call? collateral-token-trait transfer collateral tx-sender (as-contract tx-sender) none))
       
+      ;; Transfer borrowed tokens to user
+      (try! (as-contract (contract-call? borrow-token-trait transfer loan-amount (as-contract tx-sender) tx-sender none)))
+      
       ;; Store loan with collateral type
       (let ((lid (var-get next-loan-id)))
         (map-set loans
@@ -324,6 +327,9 @@
       (liquidation-id (var-get next-liquidation-id))
     )
       (asserts! (<= collateral-to-seize (get collateral loan)) (err ERR-LIQUIDATION-FAILED))
+      
+      ;; Liquidator must provide repayment tokens
+      (try! (contract-call? borrow-token-trait transfer liquidation-amount tx-sender (as-contract tx-sender) none))
       
       ;; Transfer collateral to liquidator
       (try! (as-contract (contract-call? collateral-token-trait transfer collateral-to-seize (as-contract tx-sender) tx-sender none)))
@@ -380,45 +386,90 @@
   (map-get? liquidations { liquidation-id: liquidation-id })
 )
 
-;; Enhanced yield calculation with risk-based interest
-(define-public (trigger-repayment (lid uint) (borrow-token-trait <sip-010-trait>))
+;; Calculate total repayment amount (principal + interest)
+(define-read-only (calculate-repayment-amount (lid uint))
+  (match (map-get? loans { loan-id: lid })
+    loan
+      (match (get-collateral-type-info (get collateral-type loan))
+        collateral-info
+          (let (
+            (blocks (- stacks-block-height (get start-height loan)))
+            (risk-adjusted-rate (/ (* interest-rate (get interest-multiplier collateral-info)) u100))
+            (interest (/ (* (get borrowed loan) risk-adjusted-rate blocks) u52560))
+            (total-repayment (+ (get borrowed loan) interest))
+          )
+            (ok total-repayment)
+          )
+        error (err error)
+      )
+    (err ERR-LOAN-NOT-FOUND)
+  )
+)
+
+;; Proper loan repayment function with full settlement requirement
+(define-public (trigger-repayment (lid uint) (repayment-amount uint) (borrow-token-trait <sip-010-trait>) (collateral-token-trait <sip-010-trait>))
   (let (
     (borrow-token (try! (get-borrow-token-contract)))
     (loan (try! (get-loan lid)))
     (collateral-info (try! (get-collateral-type-info (get collateral-type loan))))
+    (collateral-token-contract (contract-of collateral-token-trait))
   )
     ;; Input validation
+    (asserts! (validate-amount repayment-amount) (err ERR-INVALID-AMOUNT))
     (asserts! (validate-principal (contract-of borrow-token-trait)) (err ERR-INVALID-CONTRACT))
+    (asserts! (validate-principal collateral-token-contract) (err ERR-INVALID-CONTRACT))
     
-    ;; Verify the provided trait matches the stored contract
+    ;; Verify provided traits match stored contracts
     (asserts! (is-eq (contract-of borrow-token-trait) borrow-token) (err ERR-UNAUTHORIZED))
+    (asserts! (is-eq (contract-of collateral-token-trait) (get collateral-type loan)) (err ERR-UNAUTHORIZED))
+    
+    ;; Only owner can repay
     (asserts! (is-eq (get owner loan) tx-sender) (err ERR-UNAUTHORIZED))
     (asserts! (not (get repaid loan)) (err ERR-LOAN-ALREADY-REPAID))
     
-    ;; Calculate yield with risk-based interest multiplier
+    ;; Pull repayment tokens from borrower into this contract.
+    ;; Caller must pass a borrow-token trait bound to their principal so the transfer can be executed.
+    (try! (contract-call? borrow-token-trait transfer repayment-amount tx-sender (as-contract tx-sender) none))
+    
+    ;; Calculate accrued interest - FIXED: now uses borrowed amount instead of collateral
     (let (
       (blocks (- stacks-block-height (get start-height loan)))
       (risk-adjusted-rate (/ (* interest-rate (get interest-multiplier collateral-info)) u100))
-      (yield (/ (* (get collateral loan) risk-adjusted-rate blocks) u52560)) ;; assume 1 year = 52560 blocks
+      (accrued (/ (* (get borrowed loan) risk-adjusted-rate blocks) u52560))  ;; FIXED: changed from collateral to borrowed
+      (total-due (+ (get borrowed loan) accrued))
     )
-      (asserts! (>= yield (get borrowed loan)) (err ERR-REPAYMENT-FAILED))
+      ;; Require full settlement for now
+      (asserts! (>= repayment-amount total-due) (err ERR-REPAYMENT-FAILED))
       
-      ;; Mark as repaid
-      (map-set loans 
-        { loan-id: lid }
-        {
-          owner: (get owner loan),
-          collateral: (get collateral loan),
-          borrowed: (get borrowed loan),
-          repaid: true,
-          start-height: (get start-height loan),
-          collateral-type: (get collateral-type loan)
-        }
+      ;; Determine any overpayment (kept in contract as protocol funds); principal cleared
+      (let (
+        (remaining-coll (get collateral loan))
+        (lid-owner (get owner loan))
       )
-      (ok true)
+        ;; Mark loan repaid and clear borrowed/collateral
+        (map-set loans
+          { loan-id: lid }
+          {
+            owner: lid-owner,
+            collateral: u0,
+            borrowed: u0,
+            repaid: true,
+            start-height: (get start-height loan),
+            collateral-type: (get collateral-type loan)
+          }
+        )
+        
+        ;; Return collateral to borrower
+        ;; Transfer collateral tokens from contract back to borrower
+        (try! (as-contract (contract-call? collateral-token-trait transfer remaining-coll (as-contract tx-sender) tx-sender none)))
+        
+        ;; success
+        (ok true)
+      )
     )
   )
 )
+
 
 ;; Admin can withdraw excess yield (if any)
 (define-public (withdraw-yield (amount uint) (yield-token-trait <sip-010-trait>))
@@ -469,7 +520,7 @@
   )
 )
 
-;; Enhanced view accrued yield with risk adjustment
+;; Enhanced view accrued yield with risk adjustment - FIXED: now uses borrowed amount
 (define-read-only (view-accrued-yield (lid uint))
   (match (map-get? loans { loan-id: lid })
     loan
@@ -478,7 +529,7 @@
           (let (
             (blocks (- stacks-block-height (get start-height loan)))
             (risk-adjusted-rate (/ (* interest-rate (get interest-multiplier collateral-info)) u100))
-            (yield (/ (* (get collateral loan) risk-adjusted-rate blocks) u52560))
+            (yield (/ (* (get borrowed loan) risk-adjusted-rate blocks) u52560))  ;; FIXED: changed from collateral to borrowed
           )
             (ok yield)
           )
