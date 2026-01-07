@@ -248,6 +248,7 @@
     (borrow-token (try! (get-borrow-token-contract)))
     (collateral-token-contract (contract-of collateral-token-trait))
     (collateral-info (try! (get-collateral-type-info collateral-token-contract)))
+    (borrower tx-sender)
   )
     ;; Input validation
     (asserts! (validate-amount collateral) (err ERR-INVALID-AMOUNT))
@@ -272,7 +273,7 @@
       (try! (contract-call? collateral-token-trait transfer collateral tx-sender (as-contract tx-sender) none))
       
       ;; Transfer borrowed tokens to user
-      (try! (as-contract (contract-call? borrow-token-trait transfer loan-amount (as-contract tx-sender) tx-sender none)))
+      (try! (as-contract (contract-call? borrow-token-trait transfer loan-amount (as-contract tx-sender) borrower none)))
       
       ;; Store loan with collateral type
       (let ((lid (var-get next-loan-id)))
@@ -305,6 +306,7 @@
     (health-factor (try! (calculate-health-factor lid)))
     (collateral-info (try! (get-collateral-type-info (get collateral-type loan))))
     (liquidation-threshold (get liquidation-threshold collateral-info))
+    (liquidator tx-sender)
   )
     ;; Input validation
     (asserts! (validate-amount liquidation-amount) (err ERR-INVALID-AMOUNT))
@@ -329,10 +331,10 @@
       (asserts! (<= collateral-to-seize (get collateral loan)) (err ERR-LIQUIDATION-FAILED))
       
       ;; Liquidator must provide repayment tokens
-      (try! (contract-call? borrow-token-trait transfer liquidation-amount tx-sender (as-contract tx-sender) none))
+      (try! (contract-call? borrow-token-trait transfer liquidation-amount liquidator (as-contract tx-sender) none))
       
       ;; Transfer collateral to liquidator
-      (try! (as-contract (contract-call? collateral-token-trait transfer collateral-to-seize (as-contract tx-sender) tx-sender none)))
+      (try! (as-contract (contract-call? collateral-token-trait transfer collateral-to-seize (as-contract tx-sender) liquidator none)))
       
       ;; Update loan
       (map-set loans
@@ -352,7 +354,7 @@
         { liquidation-id: liquidation-id }
         {
           loan-id: lid,
-          liquidator: tx-sender,
+          liquidator: liquidator,
           liquidated-amount: liquidation-amount,
           collateral-seized: collateral-to-seize,
           timestamp: stacks-block-height
@@ -413,6 +415,7 @@
     (loan (try! (get-loan lid)))
     (collateral-info (try! (get-collateral-type-info (get collateral-type loan))))
     (collateral-token-contract (contract-of collateral-token-trait))
+    (borrower tx-sender)
   )
     ;; Input validation
     (asserts! (validate-amount repayment-amount) (err ERR-INVALID-AMOUNT))
@@ -429,7 +432,7 @@
     
     ;; Pull repayment tokens from borrower into this contract.
     ;; Caller must pass a borrow-token trait bound to their principal so the transfer can be executed.
-    (try! (contract-call? borrow-token-trait transfer repayment-amount tx-sender (as-contract tx-sender) none))
+    (try! (contract-call? borrow-token-trait transfer repayment-amount borrower (as-contract tx-sender) none))
     
     ;; Calculate accrued interest - FIXED: now uses borrowed amount instead of collateral
     (let (
@@ -461,7 +464,7 @@
         
         ;; Return collateral to borrower
         ;; Transfer collateral tokens from contract back to borrower
-        (try! (as-contract (contract-call? collateral-token-trait transfer remaining-coll (as-contract tx-sender) tx-sender none)))
+        (try! (as-contract (contract-call? collateral-token-trait transfer remaining-coll (as-contract tx-sender) borrower none)))
         
         ;; success
         (ok true)
@@ -475,6 +478,7 @@
 (define-public (withdraw-yield (amount uint) (yield-token-trait <sip-010-trait>))
   (let (
     (yield-token (try! (get-yield-token-contract)))
+    (admin-principal tx-sender)
   )
     ;; Input validation
     (asserts! (validate-amount amount) (err ERR-INVALID-AMOUNT))
@@ -483,7 +487,7 @@
     ;; Verify the provided trait matches the stored contract
     (asserts! (is-eq (contract-of yield-token-trait) yield-token) (err ERR-UNAUTHORIZED))
     (asserts! (is-eq tx-sender (var-get admin)) (err ERR-UNAUTHORIZED))
-    (as-contract (contract-call? yield-token-trait transfer amount (as-contract tx-sender) tx-sender none))
+    (as-contract (contract-call? yield-token-trait transfer amount (as-contract tx-sender) admin-principal none))
   )
 )
 
@@ -564,8 +568,4 @@
           liquidation-threshold: (get liquidation-threshold collateral-info),
           is-liquidatable: (< health-factor (get liquidation-threshold collateral-info)),
           collateral-type: (get collateral-type loan)
-        })
-      )
-    error (err error)
-  )
-)
+ 
